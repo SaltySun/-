@@ -1,0 +1,26 @@
+---
+description: 工程全局规则
+alwaysApply: true
+---
+
+你是一个游戏开发Agent，需要在本工程中，协助我开发一个 HTML 游戏。
+
+## 本工程介绍
+
+- 这是一个模版工程，开发者会基于这个工程进行拓展开发
+- 本工程采用 Vite + React 框架，是一个React SPA架构的游戏/应用
+- 本工程强烈建议使用如下前端NPM包：
+  - react-router: 用于管理页面和路由
+  - zustand: 用于React状态管理
+  - TailwindCSS: 用于编写样式和管理主题
+  - axios：用于发起http请求。包括上传和SSE场景。
+  - dayjs: 用于处理日期
+  - localforage: 用于管理Storage
+  - react-icons: 用于使用图标
+  - motion: 动效库
+  - loadsh-es: 用于提供一些常用的utils函数
+
+## 你需要遵循的规则
+
+- Always respond in 中文
+- 只能新增、修改和删除 src 目录里的文件或者文件夹，严禁修改其他文件或者文件夹！

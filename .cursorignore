@@ -1,0 +1,6 @@
+.npmrc
+biome.json
+index.html
+pnpm-lock.yaml
+.trae/
+.cursor/
