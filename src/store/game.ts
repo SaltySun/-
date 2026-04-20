@@ -20,6 +20,8 @@ export type GameSave = {
   cycleCount: number;
   dungeonLetter: "A" | "B" | "C" | null;
   dungeonState: DungeonState | null;
+  // 全局NPC关系（跨副本继承）
+  globalNPCBonds: NPCBond[];
 };
 
 export type SaveSlot = {
@@ -99,6 +101,11 @@ type GameState = GameSave & {
   appendNarrative: (entry: NarrativeEntry) => void;
   setDungeonStream: (isStreaming: boolean, buffer?: string) => void;
   setDungeonEnding: (ending: { title: string; description: string }) => void;
+  setDungeonObjective: (objective: DungeonObjective) => void;
+  updateDungeonProgress: (label: string, current: number, total?: number) => void;
+  completeDungeonObjective: () => void;
+  addDungeonClue: (clue: Clue) => void;
+  markChapterComplete: (chapter: DungeonChapter) => void;
   endDungeon: () => void;
   // 存档
   saveGame: (slot: number, name?: string) => void;
@@ -124,6 +131,9 @@ const INITIAL_STATE: GameSave = {
   cycleCount: 0,
   dungeonLetter: null,
   dungeonState: null,
+  globalNPCBonds: [
+    { npcId: "silas_vane", name: "塞拉斯·维恩", fondness: 10, status: "陌生", attitude: "试探", flags: [] },
+  ],
 };
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -367,6 +377,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   startDungeon: (difficulty = "困难") => {
     // 清理旧副本记忆
     clearDungeonMemory("gray_corrosion").catch(() => {});
+    const { globalNPCBonds } = get();
+    const chapterA = getChapterTemplate("A");
+    // 用全局NPC关系初始化副本关系（跨副本继承）
+    const dungeonNPCBonds = globalNPCBonds.map((b) => ({ ...b }));
     const initialDungeon: DungeonState = {
       moduleId: "gray_corrosion",
       chapter: "A",
@@ -376,17 +390,32 @@ export const useGameStore = create<GameState>((set, get) => ({
       choices: [],
       currentText: "",
       collectedItems: [],
-      npcBonds: [
-        { npcId: "silas_vane", name: "塞拉斯·维恩", fondness: 10, status: "陌生", flags: [] },
-      ],
+      npcBonds: dungeonNPCBonds,
       choiceHistory: [],
       dyingRounds: -1,
       combatCount: 0,
       lastCombatRound: -1,
       isStreaming: false,
       streamBuffer: "",
+      discoveredClues: [],
+      completedChapters: [],
+      currentObjective: chapterA?.objective ? { title: chapterA.objective, progress: [] } : undefined,
     };
     set({ phase: "dungeon", dungeonState: initialDungeon });
+  },
+
+  endDungeon: () => {
+    clearDungeonMemory("gray_corrosion").catch(() => {});
+    set((s) => {
+      // 将副本中更新的NPC关系同步回全局
+      const updatedBonds = s.dungeonState?.npcBonds ?? s.globalNPCBonds;
+      return {
+        phase: "hub",
+        hubLocation: "广场",
+        dungeonState: null,
+        globalNPCBonds: updatedBonds,
+      };
+    });
   },
 
   consumeDungeonItem: (name, qty = 1) => {
@@ -453,6 +482,12 @@ export const useGameStore = create<GameState>((set, get) => ({
       const summary = summaryParts.join("；") + "。";
       saveChapterSummary(s.dungeonState.moduleId, prevChapter, summary).catch(() => {});
 
+      // 设置新章节目标
+      const nextTemplate = getChapterTemplate(chapter);
+      const nextObjective = nextTemplate?.objective
+        ? { title: nextTemplate.objective, progress: [] as import("./types").ObjectiveProgress[] }
+        : undefined;
+
       return {
         dungeonState: {
           ...s.dungeonState,
@@ -461,6 +496,7 @@ export const useGameStore = create<GameState>((set, get) => ({
           combatSummary: undefined,
           combatCount: 0, // 新章节重置战斗计数
           lastCombatRound: -1,
+          currentObjective: nextObjective,
         },
       };
     });
@@ -516,10 +552,20 @@ export const useGameStore = create<GameState>((set, get) => ({
             else if (newFondness >= 30) status = "熟悉";
             else if (newFondness >= 10) status = "陌生";
             else status = "敌对";
+            // 态度自动映射（更细粒度）
+            let attitude: NPCBond["attitude"] = bond.attitude;
+            if (newFondness >= 85) attitude = "依赖";
+            else if (newFondness >= 70) attitude = "信任";
+            else if (newFondness >= 50) attitude = "友好";
+            else if (newFondness >= 35) attitude = "试探";
+            else if (newFondness >= 15) attitude = "冷漠";
+            else if (newFondness >= 5) attitude = "警惕";
+            else attitude = "敌对";
             return {
               ...bond,
               fondness: newFondness,
               status,
+              attitude,
               flags: flag ? [...bond.flags, flag] : bond.flags,
             };
           }),
@@ -574,13 +620,82 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
-  endDungeon: () => {
-    clearDungeonMemory("gray_corrosion").catch(() => {});
-    set((s) => ({
-      phase: "hub",
-      hubLocation: "广场",
-      dungeonState: null,
-    }));
+  setDungeonObjective: (objective) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          currentObjective: objective,
+        },
+      };
+    });
+  },
+
+  updateDungeonProgress: (label, current, total) => {
+    set((s) => {
+      if (!s.dungeonState || !s.dungeonState.currentObjective) return s;
+      const obj = s.dungeonState.currentObjective;
+      const existing = obj.progress.find((p) => p.label === label);
+      let newProgress;
+      if (existing) {
+        newProgress = obj.progress.map((p) =>
+          p.label === label ? { ...p, current, total: total ?? p.total } : p
+        );
+      } else {
+        newProgress = [...obj.progress, { label, current, total: total ?? current }];
+      }
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          currentObjective: { ...obj, progress: newProgress },
+        },
+      };
+    });
+  },
+
+  completeDungeonObjective: () => {
+    set((s) => {
+      if (!s.dungeonState || !s.dungeonState.currentObjective) return s;
+      const chapter = s.dungeonState.chapter;
+      const completed = s.dungeonState.completedChapters.includes(chapter)
+        ? s.dungeonState.completedChapters
+        : [...s.dungeonState.completedChapters, chapter];
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          currentObjective: undefined,
+          completedChapters: completed,
+        },
+      };
+    });
+  },
+
+  addDungeonClue: (clue) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      const exists = s.dungeonState.discoveredClues.some((c) => c.title === clue.title);
+      if (exists) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          discoveredClues: [...s.dungeonState.discoveredClues, clue],
+        },
+      };
+    });
+  },
+
+  markChapterComplete: (chapter) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      if (s.dungeonState.completedChapters.includes(chapter)) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          completedChapters: [...s.dungeonState.completedChapters, chapter],
+        },
+      };
+    });
   },
 
   resetGame: () => set(INITIAL_STATE),

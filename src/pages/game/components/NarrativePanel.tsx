@@ -191,6 +191,11 @@ export default function NarrativePanel({ player, companions, onCombatStart }: Na
     recordDungeonCombat,
     advanceDungeon,
     setDungeonEnding,
+    setDungeonObjective,
+    updateDungeonProgress,
+    completeDungeonObjective,
+    addDungeonClue,
+    markChapterComplete,
     endDungeon,
     addWeapon,
     addArmor,
@@ -293,14 +298,50 @@ export default function NarrativePanel({ player, companions, onCombatStart }: Na
         // 处理章节推进
         if (node.nextChapter) {
           advanceDungeon(node.nextChapter);
+          // 设置新章节的默认目标（从章节模板读取）
+          const nextTemplate = getChapterTemplate(node.nextChapter);
+          if (nextTemplate?.objective) {
+            setDungeonObjective({ title: nextTemplate.objective, progress: [] });
+          }
           return;
+        }
+
+        // 处理目标系统更新
+        if (node.objectiveUpdate) {
+          if (node.objectiveUpdate.title) {
+            setDungeonObjective({ title: node.objectiveUpdate.title, progress: node.objectiveUpdate.progress ?? [] });
+          } else if (node.objectiveUpdate.progress && node.objectiveUpdate.progress.length > 0) {
+            for (const p of node.objectiveUpdate.progress) {
+              updateDungeonProgress(p.label, p.current, p.total);
+            }
+          }
+          if (node.objectiveUpdate.completed) {
+            completeDungeonObjective();
+            appendNarrative({ role: "system", content: "✅ 当前目标已完成。", timestamp: Date.now() });
+          }
+        }
+
+        // 处理新线索
+        if (node.newClues && node.newClues.length > 0) {
+          for (const clue of node.newClues) {
+            addDungeonClue(clue);
+            appendNarrative({ role: "system", content: `🕵️ 发现线索：${clue.title}`, timestamp: Date.now() });
+          }
         }
 
         // 处理状态变化（消耗/治疗/伤害/恢复/扣减/获得装备）
         let nextHp = player.hp;
         let nextEp = player.ep;
-        if (node.statusChanges && node.statusChanges.length > 0) {
-          for (const change of node.statusChanges) {
+        // 战后恢复过滤：战斗刚结束时，禁止 AI 自动恢复 HP/EP（防止脑补回血）
+        const isPostCombat = !!combatSummary;
+        const filteredChanges = isPostCombat
+          ? node.statusChanges?.filter((c) => c.type !== "heal_hp" && c.type !== "heal_ep") ?? []
+          : node.statusChanges ?? [];
+        if (isPostCombat && filteredChanges.length < (node.statusChanges?.length ?? 0)) {
+          appendNarrative({ role: "system", content: "（战后叙事中忽略了自动恢复效果——战斗损耗不会凭空消失）", timestamp: Date.now() });
+        }
+        if (filteredChanges.length > 0) {
+          for (const change of filteredChanges) {
             switch (change.type) {
               case "consume": {
                 if (change.target) {
@@ -614,11 +655,53 @@ export default function NarrativePanel({ player, companions, onCombatStart }: Na
           {chapter?.location && <div>{chapter.location}</div>}
           {silasBond && (
             <div className="mt-1 text-gold">
-              {silasBond.name} · {silasBond.status}
+              {silasBond.name} · {silasBond.status} · {silasBond.attitude}
             </div>
           )}
         </div>
       </div>
+
+      {/* 目标与线索面板 */}
+      {(state.currentObjective || state.discoveredClues.length > 0) && (
+        <div className="border-2 border-stone bg-parchment-dark p-4">
+          {state.currentObjective && (
+            <div className="mb-3">
+              <div className="text-xs font-semibold uppercase tracking-widest text-ink-light">当前目标</div>
+              <div className="mt-1 text-sm font-bold text-ink">{state.currentObjective.title}</div>
+              {state.currentObjective.progress.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {state.currentObjective.progress.map((p, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="h-2 flex-1 bg-stone/30">
+                        <div
+                          className="h-full bg-gold transition-all"
+                          style={{ width: `${Math.min(100, (p.current / p.total) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] text-ink-light">
+                        {p.label} {p.current}/{p.total}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {state.discoveredClues.length > 0 && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-widest text-ink-light">已发现线索</div>
+              <div className="mt-1 space-y-1">
+                {state.discoveredClues.map((clue, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs text-ink">
+                    <span className="text-gold">◆</span>
+                    <span>{clue.title}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 叙事文本区域 */}
       <div

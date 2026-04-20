@@ -37,6 +37,7 @@ export interface NPCBond {
   name: string;
   fondness: number; // 0~100
   status: "陌生" | "熟悉" | "信任" | "羁绊" | "敌对";
+  attitude: "冷漠" | "试探" | "友好" | "信任" | "依赖" | "警惕" | "敌对";
   flags: string[]; // 剧情标记，如 "received_warning", "shared_secret"
 }
 
@@ -74,6 +75,26 @@ export interface Checkpoint {
   description?: string; // 场景描述，如"一扇锈死的铁门"
 }
 
+/** 目标进度项 */
+export interface ObjectiveProgress {
+  label: string;
+  current: number;
+  total: number;
+}
+
+/** 副本目标 */
+export interface DungeonObjective {
+  title: string;
+  progress: ObjectiveProgress[];
+}
+
+/** 线索 */
+export interface Clue {
+  title: string;
+  description: string;
+  chapter?: DungeonChapter;
+}
+
 export interface NarrativeNode {
   sceneDescription: string;
   segments: NarrativeSegment[];
@@ -96,6 +117,14 @@ export interface NarrativeNode {
     title: string;
     description: string;
   };
+  /** 目标更新（AI 标记 [目标:标题] [进度:标签=当前/总计] [目标完成]） */
+  objectiveUpdate?: {
+    title?: string;
+    progress?: ObjectiveProgress[];
+    completed?: boolean;
+  };
+  /** 新线索（AI 标记 [线索:标题]） */
+  newClues?: Clue[];
 }
 
 /** 战斗摘要（传递给 AI 继续叙事用） */
@@ -133,6 +162,10 @@ export interface DungeonState {
     title: string;
     description: string;
   };
+  // 目标系统
+  currentObjective?: DungeonObjective;
+  discoveredClues: Clue[];
+  completedChapters: DungeonChapter[];
 }
 
 /** 章节模板定义 */

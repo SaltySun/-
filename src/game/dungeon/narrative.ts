@@ -49,6 +49,11 @@ ${w.truth}
 - 塞拉斯的金发是视觉符号
 - 蜂蜜渍金桔代表人性温暖
 - **NPC 初次出场时，玩家不知道其名字。先用外貌/身份特征称呼（如「那位守烛人」「金发青年」），等玩家从对话或事件中得知名字后再使用全名**
+- **NPC态度决定台词基调**：
+  - 冷漠/试探：保持距离，简短回答，不轻易透露信息
+  - 友好/信任：主动提供帮助，分享细节，语气温暖
+  - 依赖：把玩家当作唯一依靠，情感表达更强烈
+  - 警惕/敌对：防备、质疑、可能拒绝合作
 
 ## 副本怪物库（触发战斗时从此列表选取）
 ${getAllDungeonMonsterNames().join("、")}
@@ -75,12 +80,17 @@ C. 选项三
 [治疗:HP+数值] / [伤害:HP-数值]
 [恢复:EP+数值] / [扣减:EP-数值]
 [结局:标题] — 仅在进入结局章节（E.x）后，当你认为结局演出已经完成时添加。添加后副本立即结束。
+[目标:标题] — 设置当前章节的目标。如：[目标:救出至少3名被困平民]
+[进度:标签=当前值/总值] — 更新目标进度。如：[进度:平民=2/3]
+[目标完成] — 标记当前目标已完成，进入章节收尾阶段。
+[线索:标题] — 发现新线索。如：[线索:贵族吞噬平民色彩记忆] 贵族通过禁忌契约定期吞噬普通人的色彩记忆以维持人性。
 
 ### 绝对规则
 - 一次只推进一个场景
 - 总字数150-250字
 - 每轮必须提供 [选择]，绝不省略
 - 你不计算数值，只负责叙事和标记
+- **战后叙事中禁止自动恢复 HP/EP**。战斗结束后，玩家必须回主神空间休息或使用道具才能恢复。你可以描述"塞拉斯递给你一瓶药剂"，但必须同时加上 [消耗:道具名] 和 [治疗:HP+数值]，否则治疗标记不会生效。
 
 ### 示例
 灰色液体从砖缝渗出，汇成黏腻沼泽。前方巷口透出钴蓝光晕。
@@ -177,12 +187,23 @@ export async function buildNarrativePrompt(
 
   // NPC关系（一行）
   if (state.npcBonds.length > 0) {
-    current += `【关系】${state.npcBonds.map((b) => `${b.name}(${b.fondness})`).join("，")}\n`;
+    current += `【关系】${state.npcBonds.map((b) => `${b.name}(${b.fondness},${b.attitude})`).join("，")}\n`;
   }
 
   // 道具（一行）
   if (state.collectedItems.length > 0) {
     current += `【道具】${state.collectedItems.map((i) => `${i.name}x${i.quantity}`).join("，")}\n`;
+  }
+
+  // 当前目标与进度（一行）
+  if (state.currentObjective) {
+    const progressText = state.currentObjective.progress.map((p) => `${p.label}${p.current}/${p.total}`).join("，");
+    current += `【目标】${state.currentObjective.title}${progressText ? "（" + progressText + "）" : ""}\n`;
+  }
+
+  // 已发现线索（一行）
+  if (state.discoveredClues.length > 0) {
+    current += `【线索】${state.discoveredClues.map((c) => c.title).join("、")}\n`;
   }
 
   // 前情摘要（L3 记忆，一行）
@@ -411,6 +432,48 @@ export function parseAIResponse(rawText: string): NarrativeNode {
     const afterMarker = working.slice(working.indexOf(endingMatch[0]) + endingMatch[0].length).trim();
     node.ending = { title, description: afterMarker || title };
     working = working.replace(/\[结局:[^\]]+\][\s\S]*/, "").trim();
+  }
+
+  // 解析目标系统标记
+  // [目标:标题]
+  const objectiveMatch = working.match(/\[目标:([^\]]+)\]/);
+  if (objectiveMatch) {
+    const title = objectiveMatch[1].trim();
+    node.objectiveUpdate = { ...node.objectiveUpdate, title };
+    working = working.replace(/\[目标:[^\]]+\]/g, "").trim();
+  }
+
+  // [进度:标签=当前值/总值] 或 [进度:标签+1]
+  const progressMatches = [...working.matchAll(/\[进度:([^=\]]+)=([\d]+)\/([\d]+)\]/g)];
+  const progressIncMatches = [...working.matchAll(/\[进度:([^\]]+)\+([\d]+)\]/g)];
+  if (progressMatches.length > 0 || progressIncMatches.length > 0) {
+    const progress: import("./types").ObjectiveProgress[] = [];
+    for (const m of progressMatches) {
+      progress.push({ label: m[1].trim(), current: parseInt(m[2], 10), total: parseInt(m[3], 10) });
+    }
+    for (const m of progressIncMatches) {
+      progress.push({ label: m[1].trim(), current: parseInt(m[2], 10), total: parseInt(m[2], 10) });
+    }
+    node.objectiveUpdate = { ...node.objectiveUpdate, progress };
+    working = working.replace(/\[进度:[^\]]+\]/g, "").trim();
+  }
+
+  // [目标完成]
+  if (working.includes("[目标完成]")) {
+    node.objectiveUpdate = { ...node.objectiveUpdate, completed: true };
+    working = working.replace(/\[目标完成\]/g, "").trim();
+  }
+
+  // [线索:标题] 描述
+  const clueMatches = [...working.matchAll(/\[线索:([^\]]+)\]/g)];
+  if (clueMatches.length > 0) {
+    node.newClues = clueMatches.map((m) => {
+      const title = m[1].trim();
+      const idx = working.indexOf(m[0]);
+      const after = working.slice(idx + m[0].length).split(/\[线索:/)[0].trim();
+      return { title, description: after || title };
+    });
+    working = working.replace(/\[线索:[^\]]+\]/g, "").trim();
   }
 
   // 清理多余空行
