@@ -10,7 +10,7 @@ import type MujianSdkLite from "@mujian/js-sdk/lite";
 const router = createBrowserRouter([
 	{
 		path: "/",
-		element: <Home />,
+		element: <GamePage />,
 	},
 	{
 		path: "/game",

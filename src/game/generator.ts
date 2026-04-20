@@ -509,6 +509,11 @@ const COMPANION_TITLES = [
   "佣兵", "护卫", "术士", "猎手", "骑士", "刺客", "祭司", "游侠",
 ];
 
+const COMPANION_TRAITS = [
+  "忠诚", "冷静", "莽撞", "贪婪", "仁慈", "狡诈", "勇敢", "悲观",
+  "乐观", "孤僻", "健谈", "洁癖", "嗜酒", "迷信", "野心", "懒散",
+];
+
 export function generateCompanion(tier?: MonsterTier): Companion {
   const finalTier = tier ?? pickOne<MonsterTier>(["普通级", "精英级"]);
 
@@ -614,6 +619,9 @@ export function generateCompanion(tier?: MonsterTier): Companion {
   return {
     id: `cmp_${Date.now()}_${randInt(1000, 9999)}`,
     name: `${pickOne(COMPANION_NAMES)} · ${pickOne(COMPANION_TITLES)}`,
+    gender: pickOne<"男" | "女">(["男", "女"]),
+    trait: pickOne(COMPANION_TRAITS),
+    fondness: 50,
     attributes,
     hp,
     maxHp: hp,

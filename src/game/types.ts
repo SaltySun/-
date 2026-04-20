@@ -199,10 +199,15 @@ export interface Monster {
   passiveAbilities: PassiveAbility[];
 }
 
+export type Gender = "男" | "女";
+
 // 随从
 export interface Companion {
   id: string;
   name: string;
+  gender: Gender;
+  trait: string;
+  fondness: number;
   attributes: Record<Attribute, number>;
   hp: number;
   maxHp: number;

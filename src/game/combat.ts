@@ -1,4 +1,4 @@
-import type { Character, Monster, Companion, CombatUnit, CombatState, CombatLog, ActiveAbility, DamageType, Buff, Debuff, PassiveAbility, MonsterCategory } from "./types";
+import type { Character, Monster, Companion, CombatUnit, CombatState, CombatLog, ActiveAbility, DamageType, Buff, Debuff, PassiveAbility, MonsterCategory, Attribute } from "./types";
 
 // ========================================
 // 战斗系统核心
@@ -486,7 +486,7 @@ export function executeAbility(
     for (const target of targets) {
       let isDebuff = effect.type.startsWith("debuff");
       const duration = (effect as { duration: number }).duration;
-      const fx = [] as { type: string; value?: number; attribute?: string; damageType?: DamageType }[];
+      const fx = [] as { type: string; value?: number; attribute?: Attribute; damageType?: DamageType }[];
 
       if (effect.type === "buff_dodge") fx.push({ type: "buff_dodge", value: (effect as { value: number }).value });
       if (effect.type === "debuff_dodge") fx.push({ type: "debuff_dodge", value: -(effect as { value: number }).value });
@@ -495,11 +495,11 @@ export function executeAbility(
       if (effect.type === "buff_attack") fx.push({ type: "buff_attack", value: (effect as { value: number }).value });
       if (effect.type === "debuff_attack") fx.push({ type: "debuff_attack", value: -(effect as { value: number }).value });
       if (effect.type === "buff_attribute") {
-        const be = effect as { attribute: string; value: number };
+        const be = effect as { attribute: Attribute; value: number };
         fx.push({ type: "buff_attribute", value: be.value, attribute: be.attribute });
       }
       if (effect.type === "debuff_attribute") {
-        const de = effect as { attribute: string; value: number };
+        const de = effect as { attribute: Attribute; value: number };
         fx.push({ type: "debuff_attribute", value: -de.value, attribute: de.attribute });
       }
       if (effect.type === "buff_resistance") {

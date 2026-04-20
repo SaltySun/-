@@ -1,7 +1,8 @@
 import { create } from "zustand";
-import type { Weapon, Armor, Bloodline, Career, Character, Consumable, Companion } from "@/game/types";
+import type { Weapon, Armor, Bloodline, Career, Character, Consumable, Companion, SkillName } from "@/game/types";
+import type { DungeonState, DungeonChapter, DungeonPhase, DungeonItem, ChoiceOption, NarrativeEntry, NPCBond, DungeonDifficulty } from "@/game/dungeon/types";
 
-export type GamePhase = "creation" | "hub" | "training" | "explore_result";
+export type GamePhase = "creation" | "hub" | "training" | "explore_result" | "dungeon";
 export type HubLocation = "广场" | "商店" | "休息区" | "训练场" | "传送门";
 
 export type GameSave = {
@@ -18,6 +19,7 @@ export type GameSave = {
   actionPoints: number;
   cycleCount: number;
   dungeonLetter: "A" | "B" | "C" | null;
+  dungeonState: DungeonState | null;
 };
 
 export type SaveSlot = {
@@ -73,6 +75,8 @@ type GameState = GameSave & {
   unequipCompanionWeapon: (companionId: string) => void;
   unequipCompanionArmor: (companionId: string) => void;
   reviveCompanions: () => void;
+  adjustCompanionFondness: (id: string, delta: number) => void;
+  chatWithCompanion: (id: string) => boolean;
   // 训练场
   trainSkill: (skill: SkillName, amount?: number) => boolean;
   // 流程控制
@@ -82,6 +86,20 @@ type GameState = GameSave & {
   restoreActionPoints: () => void;
   nextCycle: () => void;
   resetGame: () => void;
+  // 副本
+  startDungeon: (difficulty?: DungeonDifficulty) => void;
+  consumeDungeonItem: (name: string, qty?: number) => boolean;
+  setDungeonDyingRounds: (rounds: number) => void;
+  recordDungeonCombat: () => void;
+  advanceDungeon: (chapter: DungeonChapter) => void;
+  makeChoice: (choice: ChoiceOption) => void;
+  addDungeonItem: (item: DungeonItem) => void;
+  updateNPCBond: (npcId: string, delta: number, flag?: string) => void;
+  setDungeonPhase: (phase: DungeonPhase) => void;
+  appendNarrative: (entry: NarrativeEntry) => void;
+  setDungeonStream: (isStreaming: boolean, buffer?: string) => void;
+  setDungeonEnding: (ending: { title: string; description: string }) => void;
+  endDungeon: () => void;
   // 存档
   saveGame: (slot: number, name?: string) => void;
   loadGame: (slot: number) => boolean;
@@ -89,6 +107,8 @@ type GameState = GameSave & {
 };
 
 import { equipWeapon as charEquipWeapon, equipArmor as charEquipArmor, setBloodline as charSetBloodline, addCareer as charAddCareer, recalculateCharacter } from "@/game/character";
+import { getChapterTemplate } from "@/game/dungeon/data";
+import { saveChapterSummary, clearDungeonMemory } from "@/utils/dungeonMemory";
 
 const INITIAL_STATE: GameSave = {
   player: null,
@@ -103,6 +123,7 @@ const INITIAL_STATE: GameSave = {
   actionPoints: 6,
   cycleCount: 0,
   dungeonLetter: null,
+  dungeonState: null,
 };
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -287,6 +308,30 @@ export const useGameStore = create<GameState>((set, get) => ({
     }));
   },
 
+  adjustCompanionFondness: (id, delta) => {
+    set((s) => ({
+      companions: s.companions.map((c) =>
+        c.id === id ? { ...c, fondness: Math.max(0, Math.min(100, c.fondness + delta)) } : c
+      ),
+    }));
+  },
+
+  chatWithCompanion: (id) => {
+    const { player, spendActionPoint, companions } = get();
+    if (!player) return false;
+    const comp = companions.find((c) => c.id === id);
+    if (!comp) return false;
+    if (!spendActionPoint(1)) return false;
+    const rand = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
+    const newFondness = Math.min(100, comp.fondness + rand(3, 8));
+    set((s) => ({
+      companions: s.companions.map((c) =>
+        c.id === id ? { ...c, fondness: newFondness } : c
+      ),
+    }));
+    return true;
+  },
+
   trainSkill: (skill, amount = 1) => {
     const { player, spendActionPoint } = get();
     if (!player) return false;
@@ -319,6 +364,225 @@ export const useGameStore = create<GameState>((set, get) => ({
     companions: s.companions.map((c) => ({ ...c, hp: c.maxHp, ep: c.maxEp })),
   })),
 
+  startDungeon: (difficulty = "困难") => {
+    // 清理旧副本记忆
+    clearDungeonMemory("gray_corrosion").catch(() => {});
+    const initialDungeon: DungeonState = {
+      moduleId: "gray_corrosion",
+      chapter: "A",
+      phase: "narrative",
+      difficulty,
+      narrativeHistory: [],
+      choices: [],
+      currentText: "",
+      collectedItems: [],
+      npcBonds: [
+        { npcId: "silas_vane", name: "塞拉斯·维恩", fondness: 10, status: "陌生", flags: [] },
+      ],
+      choiceHistory: [],
+      dyingRounds: -1,
+      combatCount: 0,
+      lastCombatRound: -1,
+      isStreaming: false,
+      streamBuffer: "",
+    };
+    set({ phase: "dungeon", dungeonState: initialDungeon });
+  },
+
+  consumeDungeonItem: (name, qty = 1) => {
+    let success = false;
+    set((s) => {
+      if (!s.dungeonState) return s;
+      const idx = s.dungeonState.collectedItems.findIndex((i) => i.name === name);
+      if (idx < 0) return s;
+      const item = s.dungeonState.collectedItems[idx];
+      if (item.quantity < qty) return s;
+      success = true;
+      const updated = [...s.dungeonState.collectedItems];
+      if (item.quantity <= qty) {
+        updated.splice(idx, 1);
+      } else {
+        updated[idx] = { ...item, quantity: item.quantity - qty };
+      }
+      return { dungeonState: { ...s.dungeonState, collectedItems: updated } };
+    });
+    return success;
+  },
+
+  setDungeonDyingRounds: (rounds) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return { dungeonState: { ...s.dungeonState, dyingRounds: rounds } };
+    });
+  },
+
+  recordDungeonCombat: () => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          combatCount: s.dungeonState.combatCount + 1,
+          lastCombatRound: s.dungeonState.narrativeHistory.length,
+        },
+      };
+    });
+  },
+
+  advanceDungeon: (chapter) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      const prevChapter = s.dungeonState.chapter;
+      // 生成上一章节摘要并存入 IndexedDB
+      const prevTemplate = getChapterTemplate(prevChapter);
+      const chapterChoices = s.dungeonState.choiceHistory.filter((c) => c.chapter === prevChapter);
+      const chapterItems = s.dungeonState.collectedItems.filter((i) => i.chapter === prevChapter);
+      const summaryParts: string[] = [];
+      if (prevTemplate) summaryParts.push(`【${prevTemplate.title}】`);
+      if (chapterChoices.length > 0) {
+        summaryParts.push(`玩家选择：${chapterChoices.map((c) => c.label).join("、")}`);
+      }
+      if (chapterItems.length > 0) {
+        summaryParts.push(`获得道具：${chapterItems.map((i) => i.name).join("、")}`);
+      }
+      if (s.dungeonState.npcBonds.length > 0) {
+        summaryParts.push(
+          `NPC状态：${s.dungeonState.npcBonds.map((b) => `${b.name}(${b.status},${b.fondness})`).join("、")}`
+        );
+      }
+      const summary = summaryParts.join("；") + "。";
+      saveChapterSummary(s.dungeonState.moduleId, prevChapter, summary).catch(() => {});
+
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          chapter,
+          phase: "narrative",
+          combatSummary: undefined,
+          combatCount: 0, // 新章节重置战斗计数
+          lastCombatRound: -1,
+        },
+      };
+    });
+  },
+
+  makeChoice: (choice) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          choiceHistory: [
+            ...s.dungeonState.choiceHistory,
+            { chapter: s.dungeonState.chapter, choiceId: choice.id, label: choice.label },
+          ],
+          choices: [],
+          phase: "loading",
+        },
+      };
+    });
+  },
+
+  addDungeonItem: (item) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      const existingIndex = s.dungeonState.collectedItems.findIndex((i) => i.name === item.name);
+      if (existingIndex >= 0) {
+        const updated = [...s.dungeonState.collectedItems];
+        updated[existingIndex] = { ...updated[existingIndex], quantity: updated[existingIndex].quantity + item.quantity };
+        return { dungeonState: { ...s.dungeonState, collectedItems: updated } };
+      }
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          collectedItems: [...s.dungeonState.collectedItems, item],
+        },
+      };
+    });
+  },
+
+  updateNPCBond: (npcId, delta, flag) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          npcBonds: s.dungeonState.npcBonds.map((bond) => {
+            if (bond.npcId !== npcId) return bond;
+            const newFondness = Math.max(0, Math.min(100, bond.fondness + delta));
+            let status: NPCBond["status"] = bond.status;
+            if (newFondness >= 80) status = "羁绊";
+            else if (newFondness >= 60) status = "信任";
+            else if (newFondness >= 30) status = "熟悉";
+            else if (newFondness >= 10) status = "陌生";
+            else status = "敌对";
+            return {
+              ...bond,
+              fondness: newFondness,
+              status,
+              flags: flag ? [...bond.flags, flag] : bond.flags,
+            };
+          }),
+        },
+      };
+    });
+  },
+
+  setDungeonPhase: (phase) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return { dungeonState: { ...s.dungeonState, phase } };
+    });
+  },
+
+  appendNarrative: (entry) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          narrativeHistory: [...s.dungeonState.narrativeHistory, entry],
+          currentText: entry.role === "narrator" || entry.role === "npc" ? entry.content : s.dungeonState.currentText,
+        },
+      };
+    });
+  },
+
+  setDungeonStream: (isStreaming, buffer = "") => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          isStreaming,
+          streamBuffer: buffer,
+        },
+      };
+    });
+  },
+
+  setDungeonEnding: (ending) => {
+    set((s) => {
+      if (!s.dungeonState) return s;
+      return {
+        dungeonState: {
+          ...s.dungeonState,
+          phase: "ending",
+          endingResult: ending,
+        },
+      };
+    });
+  },
+
+  endDungeon: () => {
+    clearDungeonMemory("gray_corrosion").catch(() => {});
+    set((s) => ({
+      phase: "hub",
+      hubLocation: "广场",
+      dungeonState: null,
+    }));
+  },
+
   resetGame: () => set(INITIAL_STATE),
 
   saveGame: (slot, name) => {
@@ -341,6 +605,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         actionPoints: state.actionPoints,
         cycleCount: state.cycleCount,
         dungeonLetter: state.dungeonLetter,
+        dungeonState: state.dungeonState,
       },
     };
     writeSaves(saves);

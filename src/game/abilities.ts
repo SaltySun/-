@@ -1,4 +1,4 @@
-import type { ActiveAbility, PassiveAbility, DamageType, Attribute, SkillName, MonsterCategory } from "./types";
+import type { ActiveAbility, PassiveAbility, DamageType, Attribute, SkillName, MonsterCategory, EquipmentQuality } from "./types";
 
 // ========================================
 // 主动能力库 (75个) + 评分 (1~10分)

@@ -1,11 +1,13 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
-import type { Weapon, Armor, Bloodline, Career, Attribute, CombatLog, Companion } from "@/game/types";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import type { Weapon, Armor, Bloodline, Career, Attribute, CombatLog, Companion, Monster, Consumable, ActiveAbility, SkillName } from "@/game/types";
 import { generateWeapon, generateArmor, generateBloodline, generateCareer, generateMonster, generateCompanion } from "@/game/generator";
 import { createCharacter, recalculateCharacter } from "@/game/character";
 import { initCombat, getCurrentUnit, doNormalAttack, doFullDefense, executeAbility, aiAutoAction, companionAutoAction, nextTurn } from "@/game/combat";
 import { useGameStore, type HubLocation, listSaves } from "@/store/game";
-import { WeaponIcon, ArmorIcon, BloodlineIcon, CareerIcon, UIIcon } from "@/components/GameIcon";
+import { WeaponIcon, ArmorIcon, BloodlineIcon, CareerIcon, UIIcon, GameIcon } from "@/components/GameIcon";
 import WikiPanel from "@/pages/wiki";
+import NarrativePanel from "@/pages/game/components/NarrativePanel";
+import { buildCombatSummaryFromState } from "@/game/dungeon/narrative";
 
 // ------------------------------------------------------------------
 // 通用 UI 组件（全局，供所有局部组件使用）
@@ -47,9 +49,9 @@ function SecondaryBtn({ children, onClick }: { children: React.ReactNode; onClic
   );
 }
 
-function GhostBtn({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) {
+function GhostBtn({ children, onClick, disabled }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean }) {
   return (
-    <button type="button" onClick={onClick} className="px-3 py-1 text-xs font-semibold uppercase tracking-widest text-gold transition hover:bg-gold/10">
+    <button type="button" onClick={onClick} disabled={disabled} className="px-3 py-1 text-xs font-semibold uppercase tracking-widest text-gold transition hover:bg-gold/10 disabled:opacity-40 disabled:cursor-not-allowed">
       {children}
     </button>
   );
@@ -275,7 +277,7 @@ function ShopPanel({ onBuyItem, companionsCount }: { onBuyItem: (type: "weapon" 
               <button type="button" onClick={() => setDetailItem(comp)} className="block truncate text-left font-display text-sm font-bold tracking-wide text-ink hover:text-gold">
                 {comp.name}
               </button>
-              <div className="text-xs text-ink-light truncate">HP {comp.maxHp} · EP {comp.maxEp} · {comp.weapon?.damageType ?? "物理"}</div>
+              <div className="text-xs text-ink-light truncate">{comp.gender} · {comp.trait} · HP {comp.maxHp} · {comp.weapon?.damageType ?? "物理"}</div>
             </div>
             <GhostBtn disabled={companionsCount >= 2} onClick={() => { if (companionsCount < 2) onBuyItem("companion", comp); }}>招募</GhostBtn>
           </div>
@@ -341,6 +343,9 @@ function ShopPanel({ onBuyItem, companionsCount }: { onBuyItem: (type: "weapon" 
               )}
               {"maxHp" in detailItem && "activeAbilities" in detailItem && "weapon" in detailItem && (
                 <>
+                  <div className="flex items-center justify-between"><span className="text-ink-light">性别</span><span>{(detailItem as Companion).gender}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-ink-light">特质</span><span>{(detailItem as Companion).trait}</span></div>
+                  <div className="flex items-center justify-between"><span className="text-ink-light">好感度</span><span>{(detailItem as Companion).fondness}/100</span></div>
                   <div className="flex items-center justify-between"><span className="text-ink-light">生命值</span><span>{(detailItem as Companion).maxHp}</span></div>
                   <div className="flex items-center justify-between"><span className="text-ink-light">能量值</span><span>{(detailItem as Companion).maxEp}</span></div>
                   <div className="flex items-center justify-between"><span className="text-ink-light">闪避</span><span>{(detailItem as Companion).dodge}</span></div>
@@ -373,7 +378,7 @@ function ShopPanel({ onBuyItem, companionsCount }: { onBuyItem: (type: "weapon" 
 // ------------------------------------------------------------------
 export default function GamePage() {
   const store = useGameStore();
-  const { player, phase, setPhase, setPlayer, hubLocation, setHubLocation, actionPoints, spendActionPoint, restoreActionPoints, nextCycle, cycleCount, companions, addCompanion, removeCompanion, equipCompanionWeapon, equipCompanionArmor, unequipCompanionWeapon, unequipCompanionArmor, trainSkill } = store;
+  const { player, phase, setPhase, setPlayer, hubLocation, setHubLocation, actionPoints, spendActionPoint, restoreActionPoints, nextCycle, cycleCount, companions, addCompanion, removeCompanion, equipCompanionWeapon, equipCompanionArmor, unequipCompanionWeapon, unequipCompanionArmor, trainSkill, adjustCompanionFondness, chatWithCompanion } = store;
 
   // ------------------- 创建角色 -------------------
   const [creationStep, setCreationStep] = useState<1 | 2>(1);
@@ -391,6 +396,7 @@ export default function GamePage() {
 
   // ------------------- 主神空间状态 -------------------
   const [trainingCombat, setTrainingCombat] = useState<ReturnType<typeof initCombat> | null>(null);
+  const lastCombatState = useRef<ReturnType<typeof initCombat> | null>(null);
   const [selectedTargetId, setSelectedTargetId] = useState<string>("");
   const [logLines, setLogLines] = useState<string[]>([]);
 
@@ -415,6 +421,38 @@ export default function GamePage() {
   const addLog = useCallback((msg: string) => {
     setLogLines((prev) => [...prev.slice(-59), msg]);
   }, []);
+
+  // 副本战斗结束处理
+  useEffect(() => {
+    if (phase !== "dungeon") return;
+    if (trainingCombat) return;
+    if (!lastCombatState.current) return;
+    if (!store.dungeonState) return;
+    if (store.dungeonState.phase !== "combat") return;
+
+    // 战斗已结束，生成摘要并恢复叙事
+    const combatState = lastCombatState.current;
+    lastCombatState.current = null;
+
+    const summary = buildCombatSummaryFromState(
+      combatState.logs,
+      player?.name ?? "",
+      companions.map((c) => c.name)
+    );
+
+    // 更新 dungeonState
+    useGameStore.setState((s) => ({
+      dungeonState: s.dungeonState
+        ? {
+            ...s.dungeonState,
+            phase: "narrative",
+            combatSummary: summary,
+          }
+        : null,
+    }));
+
+    addLog(`副本战斗结束。${summary.playerAlive ? "存活" : "阵亡"}。`);
+  }, [trainingCombat, phase, player, companions]);
 
   const restAtHub = () => {
     if (!player) return;
@@ -483,6 +521,23 @@ export default function GamePage() {
     resetPlayerMenu();
     resetEnemyMenu();
     addLog(state.logs[state.logs.length - 1]?.message || "训练结束");
+
+    // 战斗结束后调整随从好感度
+    const enemiesAlive = state.units.some((u) => !u.isPlayer && u.hp > 0);
+    const companionsInCombat = companions.filter((c) => state.units.some((u) => u.id === c.id));
+    if (!enemiesAlive) {
+      // 胜利：参战随从 +5
+      companionsInCombat.forEach((c) => {
+        if (c.hp > 0) adjustCompanionFondness(c.id, 5);
+      });
+    }
+    companionsInCombat.forEach((c) => {
+      if (c.hp <= 0) adjustCompanionFondness(c.id, -20);
+    });
+
+    // 保存战斗状态，供副本战斗结束后使用
+    lastCombatState.current = state;
+
     setTimeout(() => {
       setTrainingCombat(null);
       setCombatMenu("main");
@@ -783,10 +838,10 @@ export default function GamePage() {
     addLog(`获得了 ${item.name}`);
   };
 
-  const enterPortal = () => {
+  const enterPortal = (difficulty: Parameters<typeof store.startDungeon>[0] = "困难") => {
     if (!player) return;
-    setPhase("explore_result");
-    addLog("踏入传送门，前往未知的副本世界……");
+    store.startDungeon(difficulty);
+    addLog(`踏入传送门，前往灰蚀大陆……（${difficulty}模式）`);
   };
 
   const returnToHub = () => {
@@ -807,7 +862,31 @@ export default function GamePage() {
     <div className="min-h-screen bg-parchment text-ink">
       <Header />
 
-      <main className="mx-auto grid max-w-7xl gap-6 p-5 md:grid-cols-[1fr_22rem] md:p-8">
+      <main className="mx-auto grid max-w-7xl gap-6 p-5 lg:grid-cols-[12rem_1fr_18rem] lg:p-8">
+        {/* 左侧导航栏 */}
+        <aside className="hidden space-y-5 lg:block">
+          {phase === "hub" && (
+            <div className="sticky top-24 space-y-1">
+              <div className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-ink-light">主神空间</div>
+              {(["广场", "商店", "休息区", "训练场", "传送门"] as HubLocation[]).map((loc) => (
+                <button
+                  key={loc}
+                  type="button"
+                  onClick={() => setHubLocation(loc)}
+                  className={`block w-full border-l-2 px-4 py-2.5 text-left text-sm font-semibold uppercase tracking-widest transition ${
+                    hubLocation === loc
+                      ? "border-gold bg-parchment text-gold"
+                      : "border-transparent text-ink-light hover:border-stone hover:text-ink"
+                  }`}
+                >
+                  {loc}
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
+
+        {/* 中间主内容 */}
         <section className="space-y-5">
           {phase === "creation" && (
             <Card className="animate-fade-in">
@@ -826,7 +905,8 @@ export default function GamePage() {
 
           {phase === "hub" && (
             <>
-              <nav className="flex flex-wrap gap-2 border-b-2 border-stone pb-3">
+              {/* 窄屏顶部 tabs（lg 以下显示） */}
+              <nav className="flex flex-wrap gap-2 border-b-2 border-stone pb-3 lg:hidden">
                 {(["广场", "商店", "休息区", "训练场", "传送门"] as HubLocation[]).map((loc) => (
                   <TabBtn key={loc} active={hubLocation === loc} onClick={() => setHubLocation(loc)}>{loc}</TabBtn>
                 ))}
@@ -933,13 +1013,7 @@ export default function GamePage() {
                 </div>
               )}
 
-              {hubLocation === "传送门" && (
-                <Card className="animate-fade-in">
-                  <h3 className="headstone mb-4 text-xl font-bold text-ink">传送门</h3>
-                  <p className="mb-5 text-ink-light">一扇古老的木门立在虚空之中。打开它，前往副本世界。</p>
-                  <PrimaryBtn onClick={enterPortal}><UIIcon icon="star" size={14} /> 踏入传送门</PrimaryBtn>
-                </Card>
-              )}
+              {hubLocation === "传送门" && (<PortalPanel />)}
             </>
           )}
 
@@ -951,21 +1025,46 @@ export default function GamePage() {
             </Card>
           )}
 
-          {phase !== "creation" && (
-            <Card>
-              <h4 className="headstone mb-3 text-sm font-bold tracking-widest text-ink-light">事件记录</h4>
-              <div className="h-40 overflow-auto border-2 border-stone bg-parchment p-4 text-sm">
-                {logLines.length === 0 && <div className="italic text-ink-light">暂无记录</div>}
-                {logLines.map((line, idx) => (
-                  <div key={idx} className="border-b border-stone/60 py-1.5 last:border-0">{line}</div>
-                ))}
-              </div>
-            </Card>
+          {phase === "dungeon" && store.dungeonState && player && (
+            <div className="animate-fade-in">
+              {store.dungeonState.phase === "combat" && trainingCombat ? (
+                <CombatScene />
+              ) : (
+                <NarrativePanel
+                  player={player}
+                  companions={companions}
+                  onCombatStart={(enemies, context) => {
+                    addLog(`遭遇战斗：${enemies.map((e) => e.name).join("、")}`);
+                    // 使用训练战斗系统承载副本战斗
+                    const combat = initCombat([player], enemies, companions);
+                    setTrainingCombat(combat);
+                    setCombatMenu("main");
+                    setSelectedTargetId("");
+                    setSelectedAbilityIndex(null);
+                    setRitualLog(null);
+                    setPendingDraftState(null);
+                  }}
+                />
+              )}
+            </div>
           )}
         </section>
 
-        <aside className="space-y-5">
+        {/* 右侧角色面板 + 事件日志 */}
+        <aside className="space-y-5 lg:sticky lg:top-24 lg:self-start lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
           <CharacterPanel />
+          {phase !== "creation" && (
+            <Card>
+              <CollapsibleSection title={<div className="headstone text-sm font-bold tracking-widest text-ink-light">事件记录</div>} defaultOpen={false}>
+                <div className="h-32 overflow-auto border-2 border-stone bg-parchment p-4 text-sm">
+                  {logLines.length === 0 && <div className="italic text-ink-light">暂无记录</div>}
+                  {logLines.map((line, idx) => (
+                    <div key={idx} className="border-b border-stone/60 py-1.5 last:border-0">{line}</div>
+                  ))}
+                </div>
+              </CollapsibleSection>
+            </Card>
+          )}
         </aside>
       </main>
 
@@ -1109,6 +1208,19 @@ export default function GamePage() {
     );
   }
 
+  function CollapsibleSection({ title, defaultOpen = true, children }: { title: React.ReactNode; defaultOpen?: boolean; children: React.ReactNode }) {
+    const [open, setOpen] = useState(defaultOpen);
+    return (
+      <div>
+        <button type="button" onClick={() => setOpen(!open)} className="flex w-full items-center justify-between">
+          <div className="flex-1 text-left">{title}</div>
+          <span className={`ml-2 text-lg text-ink-light transition-transform duration-200 ${open ? "rotate-90" : ""}`}>›</span>
+        </button>
+        {open && <div className="mt-3">{children}</div>}
+      </div>
+    );
+  }
+
   function CharacterPanel() {
     if (!player) {
       return (
@@ -1120,150 +1232,159 @@ export default function GamePage() {
     return (
       <div className="space-y-5">
         <Card>
-          <div className="mb-4 flex items-center gap-3 border-b-2 border-stone pb-4">
-            <div className="flex h-12 w-12 items-center justify-center border-2 border-gold bg-parchment">
-              <UIIcon icon="star" size={22} />
-            </div>
-            <div>
-              <div className="headstone text-base font-bold text-ink">{player.name}</div>
-              <div className="text-xs italic text-ink-light">
-                {player.career?.name || "无职业"}
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <StatBar icon={<UIIcon icon="hp" size={14} />} label="生命值" current={player.hp} max={player.maxHp} color="bg-blood" />
-            <StatBar icon={<UIIcon icon="ep" size={14} />} label="能量值" current={player.ep} max={player.maxEp} color="bg-bronze" />
-
-            <div className="grid grid-cols-2 gap-3 border-t-2 border-stone pt-4">
-              <AttrBox icon={<UIIcon icon="strength" size={14} />} label="力量" value={player.attributes.力量} />
-              <AttrBox icon={<UIIcon icon="agility" size={14} />} label="敏捷" value={player.attributes.敏捷} />
-              <AttrBox icon={<UIIcon icon="intelligence" size={14} />} label="智力" value={player.attributes.智力} />
-              <AttrBox icon={<UIIcon icon="will" size={14} />} label="意志" value={player.attributes.意志} />
-            </div>
-
-            <div className="border-t-2 border-stone pt-4 text-sm">
-              <div className="mb-2 flex items-center gap-2 text-ink-light"><UIIcon icon="dodge" size={12} /> 闪避 <span className="ml-auto font-display text-lg">{player.dodge}</span></div>
-              <div className="mb-2 flex items-center gap-2 text-ink-light"><UIIcon icon="block" size={12} /> 格挡 <span className="ml-auto font-display text-lg">{player.block}</span></div>
-              <div className="flex items-center gap-2 text-ink-light"><UIIcon icon="attack" size={12} /> 攻击 <span className="ml-auto font-display text-lg">+{player.attackBonus}</span></div>
-            </div>
-          </div>
-        </Card>
-
-        <Card>
-          <div className="mb-3 font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">技能等级</div>
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            {Object.entries(player.skills).map(([name, value]) => (
-              <div key={name} className="flex items-center justify-between border-b border-stone pb-1.5">
-                <span className="text-ink-light">{name}</span>
-                <span className="font-display text-base font-semibold">{value}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card>
-          <div className="mb-3 font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">能力</div>
-          {player.activeAbilities.length === 0 && player.passiveAbilities.length === 0 ? (
-            <div className="text-sm italic text-ink-light">暂无可用的主动或被动能力</div>
-          ) : (
-            <div className="space-y-4 text-sm">
-              {player.activeAbilities.length > 0 && (
+          <CollapsibleSection
+            title={
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center border-2 border-gold bg-parchment">
+                  <UIIcon icon="star" size={22} />
+                </div>
                 <div>
-                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gold">主动能力</div>
-                  <div className="space-y-1.5">
-                    {player.activeAbilities.map((a) => (
-                      <div key={a.id} className="border border-stone bg-parchment-dark p-2">
-                        <div className="flex items-center justify-between">
-                          <span className="font-display text-sm font-semibold text-ink">{a.name}</span>
-                          <span className="text-[10px] text-ink-light">{a.cost}{a.costType === "能量值" ? "EP" : "HP"} · {a.target}</span>
+                  <div className="headstone text-base font-bold text-ink">{player.name}</div>
+                  <div className="text-xs italic text-ink-light">{player.career?.name || "无职业"}</div>
+                </div>
+              </div>
+            }
+            defaultOpen={true}
+          >
+            <div className="space-y-4 border-t-2 border-stone pt-4">
+              <StatBar icon={<UIIcon icon="hp" size={14} />} label="生命值" current={player.hp} max={player.maxHp} color="bg-blood" />
+              <StatBar icon={<UIIcon icon="ep" size={14} />} label="能量值" current={player.ep} max={player.maxEp} color="bg-bronze" />
+
+              <div className="grid grid-cols-2 gap-3 border-t-2 border-stone pt-4">
+                <AttrBox icon={<UIIcon icon="strength" size={14} />} label="力量" value={player.attributes.力量} />
+                <AttrBox icon={<UIIcon icon="agility" size={14} />} label="敏捷" value={player.attributes.敏捷} />
+                <AttrBox icon={<UIIcon icon="intelligence" size={14} />} label="智力" value={player.attributes.智力} />
+                <AttrBox icon={<UIIcon icon="will" size={14} />} label="意志" value={player.attributes.意志} />
+              </div>
+
+              <div className="border-t-2 border-stone pt-4 text-sm">
+                <div className="mb-2 flex items-center gap-2 text-ink-light"><UIIcon icon="dodge" size={12} /> 闪避 <span className="ml-auto font-display text-lg">{player.dodge}</span></div>
+                <div className="mb-2 flex items-center gap-2 text-ink-light"><UIIcon icon="block" size={12} /> 格挡 <span className="ml-auto font-display text-lg">{player.block}</span></div>
+                <div className="flex items-center gap-2 text-ink-light"><UIIcon icon="attack" size={12} /> 攻击 <span className="ml-auto font-display text-lg">+{player.attackBonus}</span></div>
+              </div>
+            </div>
+          </CollapsibleSection>
+        </Card>
+
+        <Card>
+          <CollapsibleSection title={<div className="font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">技能等级</div>}>
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              {Object.entries(player.skills).map(([name, value]) => (
+                <div key={name} className="flex items-center justify-between border-b border-stone pb-1.5">
+                  <span className="text-ink-light">{name}</span>
+                  <span className="font-display text-base font-semibold">{value}</span>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        </Card>
+
+        <Card>
+          <CollapsibleSection title={<div className="font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">能力</div>}>
+            {player.activeAbilities.length === 0 && player.passiveAbilities.length === 0 ? (
+              <div className="text-sm italic text-ink-light">暂无可用的主动或被动能力</div>
+            ) : (
+              <div className="space-y-4 text-sm">
+                {player.activeAbilities.length > 0 && (
+                  <div>
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gold">主动能力</div>
+                    <div className="space-y-1.5">
+                      {player.activeAbilities.map((a) => (
+                        <div key={a.id} className="border border-stone bg-parchment-dark p-2">
+                          <div className="flex items-center justify-between">
+                            <span className="font-display text-sm font-semibold text-ink">{a.name}</span>
+                            <span className="text-[10px] text-ink-light">{a.cost}{a.costType === "能量值" ? "EP" : "HP"} · {a.target}</span>
+                          </div>
+                          <div className="mt-1 text-xs text-ink-light">{a.description}</div>
                         </div>
-                        <div className="mt-1 text-xs text-ink-light">{a.description}</div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
-              {player.passiveAbilities.length > 0 && (
-                <div>
-                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gold">被动能力</div>
-                  <div className="space-y-1.5">
-                    {player.passiveAbilities.map((p) => (
-                      <div key={p.id} className="border border-stone bg-parchment-dark p-2">
-                        <div className="font-display text-sm font-semibold text-ink">{p.name}</div>
-                        <div className="mt-1 text-xs text-ink-light">{p.description}</div>
-                      </div>
-                    ))}
+                )}
+                {player.passiveAbilities.length > 0 && (
+                  <div>
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gold">被动能力</div>
+                    <div className="space-y-1.5">
+                      {player.passiveAbilities.map((p) => (
+                        <div key={p.id} className="border border-stone bg-parchment-dark p-2">
+                          <div className="font-display text-sm font-semibold text-ink">{p.name}</div>
+                          <div className="mt-1 text-xs text-ink-light">{p.description}</div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </CollapsibleSection>
         </Card>
 
         <Card>
-          <div className="mb-3 font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">当前装备</div>
-          <div className="space-y-3 text-sm">
-            <EquipRow icon={<WeaponIcon category={player.weapon?.category || "轻型"} size={16} />} label="武器" value={player.weapon?.name} />
-            <EquipRow icon={<ArmorIcon type={player.armor?.type || "轻甲"} size={16} />} label="护甲" value={player.armor?.name} />
-            <EquipRow icon={<BloodlineIcon rarity={player.bloodline?.rarity || "稀有"} size={16} />} label="血统" value={player.bloodline?.name} />
-          </div>
+          <CollapsibleSection title={<div className="font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">当前装备</div>}>
+            <div className="space-y-3 text-sm">
+              <EquipRow icon={<WeaponIcon category={player.weapon?.category || "轻型"} size={16} />} label="武器" value={player.weapon?.name} />
+              <EquipRow icon={<ArmorIcon type={player.armor?.type || "轻甲"} size={16} />} label="护甲" value={player.armor?.name} />
+              <EquipRow icon={<BloodlineIcon rarity={player.bloodline?.rarity || "稀有"} size={16} />} label="血统" value={player.bloodline?.name} />
+            </div>
+          </CollapsibleSection>
         </Card>
 
         {companions.length > 0 && (
           <Card>
-            <div className="mb-3 font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">随从</div>
-            <div className="space-y-2">
-              {companions.map((c) => (
-                <div key={c.id} className={`border p-2 text-xs ${c.hp > 0 ? "border-stone bg-parchment-dark" : "border-blood/30 bg-parchment-dark/50"}`}>
-                  <div className="flex items-center justify-between">
-                    <span className="font-display font-semibold text-ink">{c.name}</span>
-                    {c.hp <= 0 && <span className="text-[10px] font-bold text-blood">阵亡</span>}
+            <CollapsibleSection title={<div className="font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">随从</div>}>
+              <div className="space-y-2">
+                {companions.map((c) => (
+                  <div key={c.id} className={`border p-2 text-xs ${c.hp > 0 ? "border-stone bg-parchment-dark" : "border-blood/30 bg-parchment-dark/50"}`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-display font-semibold text-ink">{c.name}</span>
+                      <span className={`font-display font-semibold ${c.fondness >= 70 ? "text-gold" : c.fondness >= 30 ? "text-bronze" : "text-blood"}`}>♥ {c.fondness}</span>
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-ink-light">{c.gender} · {c.trait} {c.hp <= 0 && <span className="text-blood">· 阵亡</span>}</div>
+                    <div className="mt-1 flex gap-3 text-ink-light">
+                      <span>HP {c.hp}/{c.maxHp}</span>
+                      <span>EP {c.ep}/{c.maxEp}</span>
+                      <span>{c.weapon?.name ?? "无武器"}</span>
+                    </div>
                   </div>
-                  <div className="mt-1 flex gap-3 text-ink-light">
-                    <span>HP {c.hp}/{c.maxHp}</span>
-                    <span>EP {c.ep}/{c.maxEp}</span>
-                    <span>{c.weapon?.name ?? "无武器"}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </CollapsibleSection>
           </Card>
         )}
 
         <Card>
-          <div className="mb-3 font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">仓库</div>
-          <div className="space-y-2 text-sm">
-            <StashRow label="武器" count={store.inventoryWeapons.length} />
-            <StashRow label="护甲" count={store.inventoryArmors.length} />
-            <StashRow label="消耗品" count={store.inventoryConsumables.length} />
-            {store.inventoryConsumables.length > 0 && (
-              <div className="space-y-1.5 border-l-2 border-stone pl-3">
-                {store.inventoryConsumables.map((c) => (
-                  <div key={c.id} className="flex items-center justify-between text-xs">
-                    <span className="text-ink-light">{c.name} <span className="text-ink-light/60">{c.effect}</span></span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const log = store.useConsumable(c.id);
-                        if (log) store.addLog(log);
-                      }}
-                      className="border border-stone px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-ink-light transition hover:border-gold hover:text-gold"
-                    >
-                      使用
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <StashRow label="血统" count={store.ownedBloodlines.length} />
-            <StashRow label="职业" count={store.ownedCareers.length} />
-          </div>
-          <div className="mt-5 flex gap-2">
-            <InventoryPanel />
-            <EquipmentPanel />
-          </div>
+          <CollapsibleSection title={<div className="font-display text-xs font-bold uppercase tracking-[0.2em] text-ink-light">仓库</div>}>
+            <div className="space-y-2 text-sm">
+              <StashRow label="武器" count={store.inventoryWeapons.length} />
+              <StashRow label="护甲" count={store.inventoryArmors.length} />
+              <StashRow label="消耗品" count={store.inventoryConsumables.length} />
+              {store.inventoryConsumables.length > 0 && (
+                <div className="space-y-1.5 border-l-2 border-stone pl-3">
+                  {store.inventoryConsumables.map((c) => (
+                    <div key={c.id} className="flex items-center justify-between text-xs">
+                      <span className="text-ink-light">{c.name} <span className="text-ink-light/60">{c.effect}</span></span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const log = store.useConsumable(c.id);
+                          if (log) addLog(log);
+                        }}
+                        className="border border-stone px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-ink-light transition hover:border-gold hover:text-gold"
+                      >
+                        使用
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <StashRow label="血统" count={store.ownedBloodlines.length} />
+              <StashRow label="职业" count={store.ownedCareers.length} />
+            </div>
+            <div className="mt-5 flex gap-2">
+              <InventoryPanel />
+              <EquipmentPanel />
+            </div>
+          </CollapsibleSection>
         </Card>
       </div>
     );
@@ -1334,15 +1455,29 @@ export default function GamePage() {
     const [showEquip, setShowEquip] = useState(false);
     const alive = companion.hp > 0;
 
+    const fondnessPct = companion.fondness;
+    const fondnessColor = fondnessPct >= 70 ? "bg-gold" : fondnessPct >= 30 ? "bg-bronze" : "bg-blood";
+
     return (
       <div className={`border-2 p-4 ${alive ? "border-stone bg-parchment-dark" : "border-blood/30 bg-parchment-dark/50"}`}>
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <UIIcon icon="ally" size={16} />
             <span className="font-display text-sm font-bold text-ink">{companion.name}</span>
+            <span className="text-[10px] text-ink-light">{companion.gender} · {companion.trait}</span>
             {!alive && <span className="text-[10px] font-bold uppercase tracking-widest text-blood">战斗中阵亡</span>}
           </div>
           <button type="button" onClick={onDismiss} className="text-[10px] font-semibold uppercase tracking-widest text-ink-light hover:text-blood">解散</button>
+        </div>
+
+        <div className="mb-3">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-ink-light">好感度</span>
+            <span className={`font-display font-semibold ${fondnessPct >= 70 ? "text-gold" : fondnessPct >= 30 ? "text-bronze" : "text-blood"}`}>{companion.fondness}/100</span>
+          </div>
+          <div className="mt-1 h-1.5 w-full bg-stone">
+            <div className={`h-1.5 ${fondnessColor}`} style={{ width: `${fondnessPct}%` }} />
+          </div>
         </div>
 
         <div className="mb-3 grid grid-cols-4 gap-2 text-center text-xs">
@@ -1412,6 +1547,241 @@ export default function GamePage() {
     );
   }
 
+  // ------------------------------------------------------------------
+  // PortalPanel - 传送门 / 副本选择
+  // ------------------------------------------------------------------
+  function PortalPanel() {
+    const [confirmOpen, setConfirmOpen] = useState(false);
+    const [selectedDifficulty, setSelectedDifficulty] = useState<"简单" | "困难" | "死亡">("困难");
+    const { player, companions } = store;
+
+    if (!player) return null;
+
+    return (
+      <div className="space-y-5 animate-fade-in">
+        {/* 标题石碑 */}
+        <div className="relative border-2 border-ink bg-parchment-dark p-8 text-center overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1 bg-gold/40" />
+          <div className="absolute bottom-0 left-0 w-full h-px bg-gold/20" />
+          <div className="mb-3 flex items-center justify-center gap-3">
+            <GameIcon artist="lorc" name="magic-portal" size={28} />
+            <span className="font-display text-xs uppercase tracking-[0.4em] text-gold">副本世界</span>
+            <GameIcon artist="lorc" name="magic-portal" size={28} />
+          </div>
+          <h2 className="headstone text-3xl font-bold text-ink mb-3">传送门</h2>
+          <div className="mx-auto h-px w-24 bg-gold/30 mb-4" />
+          <p className="text-sm text-ink-light max-w-lg mx-auto leading-relaxed">
+            虚空之中悬浮着无数破碎的门扉，每一扇都通往一个被灰蚀或灾变吞噬的世界。
+            <br />
+            主神空间将这些残骸收集为「副本」，供轮回者磨砺与掠夺。
+          </p>
+        </div>
+
+        {/* 副本卡片 */}
+        <div className="border-2 border-ink bg-parchment-dark relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1 bg-blood/30" />
+
+          {/* 卡片头部 */}
+          <div className="p-6 border-b-2 border-stone">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div className="border-2 border-blood/40 bg-parchment p-3">
+                  <GameIcon artist="lorc" name="evil-hand" size={40} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-3">
+                    <h3 className="headstone text-xl font-bold text-ink">灰蚀大陆</h3>
+                    <span className="font-display text-[10px] uppercase tracking-[0.3em] text-gold">Gray Corrosion</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="border border-stone px-2 py-0.5 text-[10px] uppercase tracking-widest text-ink-light">奇幻</span>
+                    <span className="border border-stone px-2 py-0.5 text-[10px] uppercase tracking-widest text-ink-light">魔法</span>
+                    <span className="border border-stone px-2 py-0.5 text-[10px] uppercase tracking-widest text-ink-light">哥特</span>
+                    <span className="border border-blood/40 px-2 py-0.5 text-[10px] uppercase tracking-widest text-blood">中等难度</span>
+                    <span className="border border-gold/40 px-2 py-0.5 text-[10px] uppercase tracking-widest text-gold">分支结局</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-ink-light">
+                <GameIcon artist="lorc" name="ghost-ally" size={14} />
+                <span>可攻略角色：塞拉斯·维恩</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 卡片内容 */}
+          <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* 简介 */}
+            <div className="lg:col-span-2 space-y-4">
+              <p className="text-sm text-ink-light leading-relaxed">
+                灰蚀大陆并非自然形成的世界，而是一件<span className="text-blood">「失败的神造物」</span>。
+                远古法师窃取「原初色谱」创造容纳「绝对之美」的容器，但被囚禁的色谱开始「腐败」，
+                化作名为<span className="text-blood">「灰蚀」</span>的反噬之力——一种「存在的稀释」。
+                被灰蚀触及之物不会死亡，而是逐渐失去颜色、情感、记忆，最终化为无名的灰色怪物。
+              </p>
+              <div className="border-l-4 border-gold bg-parchment p-4">
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">核心冲突</div>
+                <p className="text-sm text-ink-light">
+                  守烛人议会分裂为保守的烬灯派与激进的辉徨派；灰烬誓约拥抱灰蚀寻求绝对理性；
+                  褪色贵族吞噬平民的「色彩记忆」维持自己的黄金时代。
+                  而你——一个外来者——将决定这个世界的命运走向。
+                </p>
+              </div>
+            </div>
+
+            {/* 元信息 */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="border border-stone bg-parchment p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-widest text-ink-light mb-1">章节</div>
+                  <div className="font-display text-2xl text-gold">A→F</div>
+                  <div className="text-[10px] text-ink-light mt-1">六章连环</div>
+                </div>
+                <div className="border border-stone bg-parchment p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-widest text-ink-light mb-1">结局</div>
+                  <div className="font-display text-2xl text-gold">5</div>
+                  <div className="text-[10px] text-ink-light mt-1">种分支结局</div>
+                </div>
+                <div className="border border-stone bg-parchment p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-widest text-ink-light mb-1">敌人</div>
+                  <div className="font-display text-2xl text-ink">27</div>
+                  <div className="text-[10px] text-ink-light mt-1">种独特怪物</div>
+                </div>
+                <div className="border border-stone bg-parchment p-3 text-center">
+                  <div className="text-[10px] uppercase tracking-widest text-ink-light mb-1">势力</div>
+                  <div className="font-display text-2xl text-ink">3</div>
+                  <div className="text-[10px] text-ink-light mt-1">大阵营</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 卡片底部 */}
+          <div className="p-4 border-t-2 border-stone bg-parchment-dark flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-4 text-xs text-ink-light">
+              <span className="flex items-center gap-1">
+                <GameIcon artist="lorc" name="crowned-skull" size={12} />
+                守烛人议会
+              </span>
+              <span className="flex items-center gap-1">
+                <GameIcon artist="lorc" name="skull-ring" size={12} />
+                灰烬誓约
+              </span>
+              <span className="flex items-center gap-1">
+                <GameIcon artist="lorc" name="trophy" size={12} />
+                褪色贵族
+              </span>
+            </div>
+            <PrimaryBtn onClick={() => setConfirmOpen(true)}>
+              <GameIcon artist="lorc" name="magic-portal" size={14} invert />
+              踏入传送门
+            </PrimaryBtn>
+          </div>
+        </div>
+
+        {/* 确认弹窗 */}
+        {confirmOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/70 p-4" onClick={(e) => { if (e.target === e.currentTarget) setConfirmOpen(false); }}>
+            <div className="w-full max-w-lg border-2 border-gold bg-parchment p-6 shadow-2xl animate-fade-in">
+              <div className="mb-4 flex items-center justify-between border-b-2 border-stone pb-3">
+                <div className="headstone text-lg font-bold text-ink">准备确认</div>
+                <button type="button" onClick={() => setConfirmOpen(false)} className="text-xs font-semibold uppercase tracking-widest text-ink-light hover:text-ink">关闭</button>
+              </div>
+
+              <p className="mb-5 text-sm text-ink-light">
+                你即将进入<span className="text-blood font-semibold">「灰蚀大陆」</span>副本。
+                副本中无法返回主神空间，战斗失败将导致角色死亡。
+                请确认你已做好充分准备。
+              </p>
+
+              {/* 玩家状态摘要 */}
+              <div className="mb-5 border-2 border-stone bg-parchment-dark p-4 space-y-3">
+                <div className="text-xs font-bold uppercase tracking-widest text-ink-light">当前状态</div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">生命值</span>
+                    <span className="font-display text-blood">{player.hp} / {player.maxHp}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">能量值</span>
+                    <span className="font-display text-gold">{player.ep} / {player.maxEp}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">武器</span>
+                    <span className="font-display">{player.weapon?.name ?? "无"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">护甲</span>
+                    <span className="font-display">{player.armor?.name ?? "无"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">职业</span>
+                    <span className="font-display">{player.career?.name ?? "无"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-ink-light">血统</span>
+                    <span className="font-display">{player.bloodline?.name ?? "无"}</span>
+                  </div>
+                </div>
+                {companions.length > 0 && (
+                  <div className="pt-2 border-t border-stone">
+                    <div className="text-[10px] uppercase tracking-widest text-ink-light mb-2">随从</div>
+                    <div className="flex flex-wrap gap-2">
+                      {companions.map((c) => (
+                        <span key={c.id} className={`border px-2 py-0.5 text-xs ${c.hp > 0 ? "border-stone" : "border-blood text-blood"}`}>
+                          {c.name} (HP {c.hp}/{c.maxHp})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 难度选择 */}
+              <div className="border-t border-stone pt-3">
+                <div className="text-[10px] uppercase tracking-widest text-ink-light mb-2">副本难度</div>
+                <div className="flex gap-2">
+                  {(["简单", "困难", "死亡"] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setSelectedDifficulty(d)}
+                      className={`flex-1 border-2 px-3 py-2 text-xs font-semibold uppercase tracking-widest transition ${
+                        selectedDifficulty === d
+                          ? d === "死亡"
+                            ? "border-blood bg-blood/10 text-blood"
+                            : "border-gold bg-gold/10 text-gold"
+                          : "border-stone text-ink-light hover:border-ink hover:text-ink"
+                      }`}
+                    >
+                      {d}
+                      <span className="ml-1 text-[10px] opacity-60">
+                        {d === "简单" ? "(最高不凡)" : d === "困难" ? "(最高稀有)" : "(最高传说)"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-[10px] text-ink-light/60">
+                  {selectedDifficulty === "简单" && "敌人较弱，装备上限为不凡，适合体验剧情。"}
+                  {selectedDifficulty === "困难" && "标准体验，敌人强度正常，装备上限为稀有。"}
+                  {selectedDifficulty === "死亡" && "敌人凶猛，装备上限为传说，但死亡将真正终结。"}
+                </p>
+              </div>
+
+              <div className="flex gap-3 justify-end">
+                <SecondaryBtn onClick={() => setConfirmOpen(false)}>返回准备</SecondaryBtn>
+                <PrimaryBtn onClick={() => { setConfirmOpen(false); enterPortal(selectedDifficulty); }}>
+                  <GameIcon artist="lorc" name="magic-portal" size={14} invert />
+                  确认进入
+                </PrimaryBtn>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function CombatScene() {
     if (!trainingCombat) return null;
     const [statusDetail, setStatusDetail] = useState<{ unitName: string; name: string; remaining: number; effects: { type: string; value?: number; attribute?: string; damageType?: string }[]; isBuff: boolean } | null>(null);
@@ -1423,6 +1793,18 @@ export default function GamePage() {
     const targetMode = combatMenu === "target";
     const selectEnemy = targetMode && (selectedAbilityIndex === null || currentAbility?.target.includes("敌对"));
     const selectAlly = targetMode && !!currentAbility?.target.includes("友方");
+
+    // 自动触发敌人/随从回合
+    useEffect(() => {
+      if (!trainingCombat) return;
+      if (trainingCombat.finished) return;
+      const unit = getCurrentUnit(trainingCombat);
+      if (!unit) return;
+      if (unit.isPlayer && unit.id === player?.id) return; // 玩家回合，等待输入
+      // 敌人或随从回合，延迟后自动执行
+      const timer = setTimeout(() => processNextUnit(trainingCombat), 600);
+      return () => clearTimeout(timer);
+    }, [trainingCombat?.currentTurnIndex, trainingCombat?.finished]);
 
     return (
       <div className="relative flex min-h-[420px] flex-col gap-4">
